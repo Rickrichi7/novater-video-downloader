@@ -17,6 +17,10 @@ User accounts (IPTV cloud save/restore, added 2026-11-07):
   POST /api/user/change-password {"username", "oldPassword", "newPassword"} -> 200 | 401
   GET  /api/user/health          {"status", "store"}
 
+TV share links (QR to Muse, added 2026-11-07):
+  POST /api/share                {"text": "..."} -> {"code": "<short code>"}
+  GET  /s/<code>                 plain readable page with the shared text
+
 Storage: a PRIVATE GitHub repo, one JSON file per user
 (users/<username>.json), via the GitHub Contents API. Render's disk is
 ephemeral, so nothing is ever kept on the server's filesystem in
@@ -28,10 +32,13 @@ backend must never run in it.
 import base64
 import hashlib
 import hmac
+import html
 import json
 import os
+import random
 import re
 import shutil
+import string
 import tempfile
 import threading
 import time
@@ -41,7 +48,7 @@ import uuid
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from pydantic import BaseModel
 from starlette.background import BackgroundTask
 
@@ -158,6 +165,70 @@ ADULT_PIN_RE = re.compile(r"^\d{3,8}$")
 ENTRY_KEYS = {"n", "u", "l", "g", "r", "hc", "id"}
 DATA_KEYS = {"version", "favorites", "hot", "removal", "dead",
              "myChannels", "hunted", "playlists", "adultPin", "appVersion"}
+
+
+# ---- TV share links (QR to Muse, added 2026-11-07) ----
+# The IPTV apps show a QR on the TV for a list that is too long to fit
+# in a QR code itself. POST /api/share stores the text in memory under
+# a short random code; GET /s/<code> renders it as a plain page the
+# phone can copy from into Muse. No auth: the codes are random and the
+# store only keeps the last 50 shares. Render's disk is ephemeral and
+# the process restarts wipe it — shares are meant to be scanned at once.
+_SHARE_STORE = {}
+_SHARE_LOCK = threading.Lock()
+_SHARE_MAX = 50
+_SHARE_CODE_LEN = 6
+
+
+class ShareRequest(BaseModel):
+    text: str = ""
+
+
+def _new_share_code() -> str:
+    alphabet = string.ascii_lowercase + string.digits
+    return "".join(random.choice(alphabet) for _ in range(_SHARE_CODE_LEN))
+
+
+@app.post("/api/share")
+def share_text(req: ShareRequest):
+    text = (req.text or "")[:20000]
+    if not text.strip():
+        raise HTTPException(status_code=400, detail="Empty text.")
+    code = _new_share_code()
+    with _SHARE_LOCK:
+        while code in _SHARE_STORE:
+            code = _new_share_code()
+        _SHARE_STORE[code] = {"text": text, "ts": time.time()}
+        while len(_SHARE_STORE) > _SHARE_MAX:
+            oldest = min(_SHARE_STORE, key=lambda k: _SHARE_STORE[k]["ts"])
+            del _SHARE_STORE[oldest]
+    return {"code": code}
+
+
+@app.get("/s/{code}", response_class=HTMLResponse)
+def shared_page(code: str):
+    with _SHARE_LOCK:
+        item = _SHARE_STORE.get(code)
+    if item is None:
+        return HTMLResponse(
+            "<!doctype html><html><head><meta charset=\"utf-8\">"
+            "<title>Share not found</title></head><body>"
+            "<h1>Share not found</h1>"
+            "<p>This link has expired or was never shared.</p>"
+            "</body></html>",
+            status_code=404)
+    body = html.escape(item["text"])
+    return HTMLResponse(
+        "<!doctype html><html><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+        "<title>Shared from your TV</title></head><body "
+        "style=\"font-family:sans-serif;max-width:800px;margin:40px auto;"
+        "padding:0 16px\">"
+        "<h1>Shared from your TV</h1>"
+        "<p>Copy this into Muse.</p>"
+        "<pre style=\"white-space:pre-wrap;word-break:break-word;"
+        "background:#f4f4f4;padding:16px;border-radius:8px\">"
+        + body + "</pre></body></html>")
 
 
 def _now_ms():
