@@ -191,7 +191,7 @@ def _new_share_code() -> str:
 
 @app.post("/api/share")
 def share_text(req: ShareRequest):
-    text = (req.text or "")[:20000]
+    text = (req.text or "")[:200000]  # raised 2026-11-08: 20k cut a 759-channel TV share at 259 entries
     if not text.strip():
         raise HTTPException(status_code=400, detail="Empty text.")
     code = _new_share_code()
